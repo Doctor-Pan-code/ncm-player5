@@ -1,0 +1,4 @@
+# ncm-player bundle patch：向组合挂载自身（Node half + client half）
+- insert:
+    - id: ncm-player
+      name: '@wolfgenerals/ncm-player'

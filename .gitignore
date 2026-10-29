@@ -1,0 +1,13 @@
+# dependencies / build junk
+node_modules/
+.pnpm/
+dist/
+
+# logs & OS junk
+*.log
+.DS_Store
+Thumbs.db
+
+# local editor state
+.idea/
+.vscode/
