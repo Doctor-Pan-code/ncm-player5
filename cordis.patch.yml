@@ -1,4 +1,8 @@
-# ncm-player bundle patch：向组合挂载自身（Node half + client half）
+# ncm-player4 bundle patch：向组合挂载自身（Node half + client half）
+# ncm-player4 = ncm-player3 1.2.0 + 点击播放窗口外自动收起为迷你条
+#   + 迷你条无操作 3 秒自动退出为右下角音符按钮
+#   + 右下角音符按钮心跳动效升级为「随音乐节奏跳动」（Web Audio 低频能量驱动）
+#   + 右下角音符按钮支持左键长按拖动（位置持久化）
 - insert:
-    - id: ncm-player
-      name: '@wolfgenerals/ncm-player'
+    - id: ncm-player4
+      name: '@wolfgenerals/ncm-player4'

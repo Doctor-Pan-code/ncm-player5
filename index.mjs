@@ -1,9 +1,12 @@
-// ncm-player Node half：网易云音乐浮窗的 API 服务端。
+// ncm-player4 Node half：网易云音乐浮窗的 API 服务端。
 // 通过 webServer 路由暴露 /ncm/api JSON API，client 半部 fetch 调用。
+// 与 ncm-player3 的 host 半部完全一致：ncm-player4 新增的两项功能（随音乐节奏
+// 跳动、长按拖动右下角图标）都实现在 client 半部，因此这里只需换插件名；
+// 路由前缀仍为 /ncm/api，两个插件不能同时启用。
 import os from 'node:os'
 import path from 'node:path'
 
-export const name = 'ncm-player'
+export const name = 'ncm-player4'
 export const inject = ['webServer', 'subprocess', 'fs']
 
 const NODE_SCRIPT = `
@@ -113,9 +116,10 @@ export async function apply (ctx) {
   // 注: v1.1.0 起持久化移交 client 半部(浏览器 localStorage),
   // 该文件仅作旧版本数据的只读迁移,不再由 host 写入。
   let homeDir = null
-  try { homeDir = os.homedir() } catch (e) { console.error('ncm: homedir failed: ' + String(e)) }
+  try { homeDir = os.homedir() } catch (e) { console.error('ncm3: homedir failed: ' + String(e)) }
   const DATA_DIR = process.env.DSH_HOME || (homeDir ? path.join(homeDir, '.dsh') : null)
-  const SETTINGS_FILE = DATA_DIR ? path.join(DATA_DIR, 'ncmply-settings') : path.join(os.tmpdir(), 'ncmply-settings')
+  // 沿用 v2 的旧文件名:仅作 ≤1.0.7 老数据的只读迁移(持久化现由 client localStorage 负责)。
+  const SETTINGS_FILE = DATA_DIR ? path.join(DATA_DIR, 'ncmply2-settings') : path.join(os.tmpdir(), 'ncmply2-settings')
   // 子进程 cwd:取一个确定存在且可写的目录(Windows 盘根/Unix 根目录对个别程序不友好)。
   const CWD = homeDir || os.tmpdir()
 
@@ -131,7 +135,7 @@ export async function apply (ctx) {
       try { nodePath = await subprocess.resolveExecutable(cand); break } catch (e) { /* next */ }
     }
   }
-  if (!nodePath) console.error('ncm: Node.js runtime not found; network disabled')
+  if (!nodePath) console.error('ncm3: Node.js runtime not found; network disabled')
 
   const runNode = async (req) => {
     if (!nodePath) throw new Error('网络服务不可用(Node.js 运行时未找到)')
@@ -508,8 +512,8 @@ export async function apply (ctx) {
   // 自检
   try {
     const l = await hotPlaylists(3)
-    console.log('ncm: self-test OK — ' + l.length + ' playlists' + (settings.account.cookie ? '; account: ' + settings.account.nickname : ''))
+    console.log('ncm3: self-test OK — ' + l.length + ' playlists' + (settings.account.cookie ? '; account: ' + settings.account.nickname : ''))
   } catch (e) {
-    console.error('ncm: self-test failed: ' + String(e))
+    console.error('ncm3: self-test failed: ' + String(e))
   }
 }

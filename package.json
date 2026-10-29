@@ -1,7 +1,7 @@
 {
-  "name": "@wolfgenerals/ncm-player",
-  "version": "1.2.0",
-  "description": "网易云音乐浮窗播放器：歌单/歌词/歌词翻译/播放队列/账号登录，适配皮肤主题",
+  "name": "@wolfgenerals/ncm-player4",
+  "version": "1.3.1",
+  "description": "网易云音乐浮窗播放器（ncm-player4）：歌单/歌词/歌词翻译/播放队列/账号登录，适配皮肤主题；点击播放窗口外即收起为迷你条；迷你条无操作 3 秒自动退出为右下角音符按钮；播放中该按钮随音乐节奏（低频鼓点）跳动；右下角图标支持左键长按拖动",
   "repository": {
     "type": "git",
     "url": "https://github.com/WolfGenerals/ncm-player.git"
