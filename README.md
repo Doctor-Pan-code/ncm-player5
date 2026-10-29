@@ -10,10 +10,16 @@
 
 上游 [WolfGenerals/ncm-player](https://github.com/WolfGenerals/ncm-player) 公开的 `package.json` 是 **1.2.0**（无 tag、无 release）。ncm-player2 / 3 都基于它派生，ncm-player4 在此基础上继续演进到 **1.3.1**，但 ncm-player4 从未公开发布，所以「ncm-player4 1.3.1」此前没有公开出处。
 
-为了让这条派生链可以公开核对，ncm-player4 1.3.1 的**完整源码原样公开在本仓库的 `baseline/ncm-player4-1.3.1` 分支**（tag `ncm-player4-v1.3.1`，与该分支同 commit，根目录结构与 ncm-player5 一致）：
+现在这条派生链在本仓库里是**一条完整的线性提交历史**，可以直接逐个 commit 审：
 
-- 分支：<https://github.com/Doctor-Pan-code/ncm-player5/tree/baseline/ncm-player4-1.3.1>
-- 对照：`git diff baseline/ncm-player4-1.3.1 main` 即 ncm-player5 相对基线的全部改动（自动跳过不可播放的歌曲 + 包名 scope 调整）
+| tag | 内容 | 说明 |
+|---|---|---|
+| `upstream-1.2.0` | 上游 `WolfGenerals/ncm-player@main` 原样导入 | 18 个文件逐字节相同，作为 1.2.0 的公开参照点 |
+| `ncm-player4-v1.3.1` | ncm-player4 1.3.1（分支 `baseline/ncm-player4-1.3.1`） | 相对 1.2.0 的派生：点击窗口外收起、无操作自动退出、播放心跳、长按拖动、无声修复 |
+| `ncm-player5-v1.4.1` | 本插件（`main`） | 相对 1.3.1 的唯一功能改动：自动跳过不可播放的歌曲；另加包名 scope 调整 |
+
+- 基线分支：<https://github.com/Doctor-Pan-code/ncm-player5/tree/baseline/ncm-player4-1.3.1>
+- 对照：`git diff ncm-player4-v1.3.1 main` 就是 ncm-player5 相对基线的全部改动
 
 > 包名说明：本插件早期沿用了上游作者的 `@wolfgenerals/` scope，但该 scope 属于上游作者，且 `@wolfgenerals/ncm-player5` 从未发布到 npm。**自 1.4.1 起包名改为 `@doctor-pan-code/ncm-player5`**（投稿人自己的 scope）。cordis 加载 id 仍是 `ncm-player5`，profile 里的 `id:` 不受影响。
 
