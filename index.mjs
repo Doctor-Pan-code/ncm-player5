@@ -1,12 +1,13 @@
-// ncm-player4 Node half：网易云音乐浮窗的 API 服务端。
+// ncm-player5 Node half：网易云音乐浮窗的 API 服务端。
 // 通过 webServer 路由暴露 /ncm/api JSON API，client 半部 fetch 调用。
-// 与 ncm-player3 的 host 半部完全一致：ncm-player4 新增的两项功能（随音乐节奏
-// 跳动、长按拖动右下角图标）都实现在 client 半部，因此这里只需换插件名；
+// 与 ncm-player4 的 host 半部功能一致，唯一新增的是「可播性检测」：
+// 下架/无版权歌曲的 url 接口返回 code -110，client 据此自动跳过播下一首。
+// 为此新增 songStatus op，并让 songUrl 附带 playable/reason/code 且支持多档音质降级。
 // 路由前缀仍为 /ncm/api，两个插件不能同时启用。
 import os from 'node:os'
 import path from 'node:path'
 
-export const name = 'ncm-player4'
+export const name = 'ncm-player5'
 export const inject = ['webServer', 'subprocess', 'fs']
 
 const NODE_SCRIPT = `
@@ -116,7 +117,7 @@ export async function apply (ctx) {
   // 注: v1.1.0 起持久化移交 client 半部(浏览器 localStorage),
   // 该文件仅作旧版本数据的只读迁移,不再由 host 写入。
   let homeDir = null
-  try { homeDir = os.homedir() } catch (e) { console.error('ncm3: homedir failed: ' + String(e)) }
+  try { homeDir = os.homedir() } catch (e) { console.error('ncm5: homedir failed: ' + String(e)) }
   const DATA_DIR = process.env.DSH_HOME || (homeDir ? path.join(homeDir, '.dsh') : null)
   // 沿用 v2 的旧文件名:仅作 ≤1.0.7 老数据的只读迁移(持久化现由 client localStorage 负责)。
   const SETTINGS_FILE = DATA_DIR ? path.join(DATA_DIR, 'ncmply2-settings') : path.join(os.tmpdir(), 'ncmply2-settings')
@@ -135,7 +136,7 @@ export async function apply (ctx) {
       try { nodePath = await subprocess.resolveExecutable(cand); break } catch (e) { /* next */ }
     }
   }
-  if (!nodePath) console.error('ncm3: Node.js runtime not found; network disabled')
+  if (!nodePath) console.error('ncm5: Node.js runtime not found; network disabled')
 
   const runNode = async (req) => {
     if (!nodePath) throw new Error('网络服务不可用(Node.js 运行时未找到)')
@@ -355,13 +356,91 @@ export async function apply (ctx) {
     const tracks = Array.isArray(al.songs) ? al.songs.map(normAlbumSong) : []
     return { id: al.id, name: String(al.name || '未知专辑'), cover: String(al.picUrl || '').replace(/^http:/, 'https:'), artist: (al.artist && al.artist.name) || '', tracks }
   }
-  const songUrl = async (id, br) => {
+  // ---- 可播性检测（ncm-player5 新增）----
+  // 自动跳过依赖这里的判定：/api/song/enhance/player/url 对可播歌曲返回 url + code 200，
+  // 对下架/无版权返回 url:null + code -110。缓存的必要性：一首不可播歌会被反复查询
+  // （播放失败 → 跳下一首 → 又可能回头），5 分钟 TTL 足够避免连跳时打爆接口，
+  // 又短到不会让"刚恢复版权"的歌长时间被误判。
+  const PLAYABLE_TTL_MS = 5 * 60 * 1000
+  const PLAYABLE_MAX_CACHE = 500
+  const playableCache = new Map()
+  const cacheGetPlayable = (key) => {
+    const hit = playableCache.get(key)
+    if (!hit) return null
+    if (hit.expireAt <= Date.now()) { playableCache.delete(key); return null }
+    // 命中时移到队尾，让 Map 的插入顺序近似 LRU，超出上限时从头部淘汰。
+    playableCache.delete(key)
+    playableCache.set(key, hit)
+    return hit.value
+  }
+  const cacheSetPlayable = (key, value) => {
+    playableCache.set(key, { value, expireAt: Date.now() + PLAYABLE_TTL_MS })
+    while (playableCache.size > PLAYABLE_MAX_CACHE) playableCache.delete(playableCache.keys().next().value)
+  }
+  const reasonOfCode = (code) => (code === -110 ? 'copyright' : code === -200 ? 'error' : 'unavailable')
+  const songPlayable = async (id, br) => {
+    const key = String(id) + '@' + String(br)
+    const cached = cacheGetPlayable(key)
+    if (cached) return Object.assign({ cached: true }, cached)
+    let result
     try {
       const j = await jsonGet('https://music.163.com/api/song/enhance/player/url?ids=' + encodeURIComponent('[' + String(id) + ']') + '&br=' + br)
       const d = j && j.data && j.data[0]
-      if (d && typeof d.url === 'string' && d.url.length > 10) return d.url.replace(/^http:/, 'https:')
-    } catch (e) { /* fall through */ }
-    return 'https://music.163.com/song/media/outer/url?id=' + encodeURIComponent(String(id)) + '.mp3'
+      const code = d && typeof d.code === 'number' ? d.code : null
+      const fee = d && typeof d.fee === 'number' ? d.fee : null
+      // freeTrial：试听片段。这种歌能放出声音（但有时长限制），不算不可播。
+      const freeTrial = !!(d && (d.freeTrialInfo || d.freeTrialPrivilege)) || fee === 1
+      if (d && typeof d.url === 'string' && d.url.length > 10) {
+        result = { playable: true, reason: null, code, fee, freeTrial, url: d.url.replace(/^http:/, 'https:') }
+      } else {
+        result = { playable: false, reason: reasonOfCode(code), code, fee, freeTrial, url: null }
+      }
+    } catch (e) {
+      // 网络抖动/子进程失败绝不能被当成"不可播"，否则会误跳过整张歌单。
+      // 判为未知 = 可播，并给一个明确的 reason 便于排查；失败结果不写缓存。
+      console.error('ncm5: playable probe failed for ' + id + ': ' + String((e && e.message) || e))
+      return { playable: true, reason: 'unknown', code: null, fee: null, freeTrial: false, url: null, cached: false }
+    }
+    cacheSetPlayable(key, result)
+    return Object.assign({ cached: false }, result)
+  }
+  // 多档音质降级：请求音质拿不到时逐级下探，全都失败才认定不可播。
+  // 去重是为了避免 [128000, 320000, ...] 这类输入重复请求同一个音质。
+  const songUrl = async (id, br) => {
+    const ladder = []
+    for (const v of [Number(br) || 320000, 320000, 192000, 128000, 96000]) {
+      if (!(v > 0) || ladder.includes(v)) continue
+      ladder.push(v)
+    }
+    let firstBad = null
+    let unknown = false
+    for (const quality of ladder) {
+      const s = await songPlayable(id, quality)
+      // reason === 'unknown' 表示接口没答上来（断网/超时），不是版权判定。
+      // 这时既不能跳过这首歌，也不能断言"可播"——如实告诉前端能力未知即可。
+      if (s.playable) {
+        if (s.reason === 'unknown') { unknown = true; break }
+        return { url: s.url, playable: true, reason: null, code: s.code }
+      }
+      if (firstBad === null) firstBad = s
+    }
+    if (unknown && firstBad === null) {
+      // 全部音质都是"没答上来"：未知，交给前端按可播处理（宁可不跳过也不错杀）。
+      return {
+        url: 'https://music.163.com/song/media/outer/url?id=' + encodeURIComponent(String(id)) + '.mp3',
+        playable: true,
+        reason: 'unknown',
+        code: null,
+      }
+    }
+    // 全部不可播：url 仍按旧行为兜底为外链，保证老客户端（只读 url）行为不变。
+    console.log('ncm5: song ' + id + ' unplayable (' + (firstBad && firstBad.reason) + '), fallback to outer url')
+    return {
+      url: 'https://music.163.com/song/media/outer/url?id=' + encodeURIComponent(String(id)) + '.mp3',
+      playable: false,
+      reason: (firstBad && firstBad.reason) || 'unavailable',
+      code: firstBad ? firstBad.code : null,
+    }
   }
   const lyric = async (id) => {
     const j = await jsonGet('https://music.163.com/api/song/lyric?os=pc&id=' + id + '&lv=-1&kv=-1&tv=-1')
@@ -448,7 +527,12 @@ export async function apply (ctx) {
       case 'albumDetail': return { album: await albumDetail(Number(args.id)) }
       case 'myPlaylists': return { items: await myPlaylists(), nickname: settings.account.nickname, uid: settings.account.uid }
       case 'myAlbums': return { items: await myAlbums() }
-      case 'songUrl': return { url: await songUrl(Number(args.id), Number(args.br) || 320000) }
+      case 'songUrl': return await songUrl(Number(args.id), Number(args.br) || 320000)
+      // 仅查可播性、不取播放地址：client 用它在切歌前预判，实现下架歌曲自动跳过。
+      case 'songStatus': {
+        const s = await songPlayable(Number(args.id), Number(args.br) || 320000)
+        return { playable: s.playable, reason: s.reason, code: s.code, fee: s.fee, freeTrial: s.freeTrial, cached: s.cached }
+      }
       case 'lyric': return lyric(Number(args.id))
       case 'like': { await like(Number(args.id), args.like !== false); return { liked: args.like !== false } }
       case 'likedSet': return { ids: await likedIds() }
@@ -512,8 +596,8 @@ export async function apply (ctx) {
   // 自检
   try {
     const l = await hotPlaylists(3)
-    console.log('ncm3: self-test OK — ' + l.length + ' playlists' + (settings.account.cookie ? '; account: ' + settings.account.nickname : ''))
+    console.log('ncm5: self-test OK — ' + l.length + ' playlists' + (settings.account.cookie ? '; account: ' + settings.account.nickname : ''))
   } catch (e) {
-    console.error('ncm3: self-test failed: ' + String(e))
+    console.error('ncm5: self-test failed: ' + String(e))
   }
 }

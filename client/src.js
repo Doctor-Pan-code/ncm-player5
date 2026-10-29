@@ -1,4 +1,9 @@
-// ncm-player4 client half：网易云音乐浮窗 UI（在 ncm-player3 基础上新增两项功能）：
+// ncm-player5 client half：网易云音乐浮窗 UI。
+// 在 ncm-player4 基础上唯一新增的功能：**自动跳过不可播放的歌曲**——
+// 因下架 / 无版权 / 音源失效而放不出来的歌，自动按当前播放模式跳到下一首；
+// 连续跳完整个队列仍无可播歌曲时停止播放并只提示一次（防死循环）。
+// 该行为可在「设置 → 播放」里关闭，关闭后与 ncm-player4 完全一致。
+// 继承 ncm-player4 的两项功能：
 //   1) 右下角音符按钮的动效由「固定心跳」升级为「随音乐节奏跳动」——用 Web Audio
 //      AnalyserNode 取低频（贝斯/底鼓）能量，检测起音（onset）后触发一次「咚」的
 //      缩放 + 光环脉冲；拍点由真实音频驱动，不同歌曲的节奏/强弱各不相同。
@@ -52,7 +57,11 @@ const DISC_DRAG = {
   margin: 6,     // 距视口边缘的最小距离
 }
 // 音符按钮位置持久化 key（与播放队列/登录态分开存，互不覆盖）。
+// 沿用 ncm-player4 的 key：位置是用户自己拖出来的，升级到 v5 后不必重拖。
 const DISC_POS_KEY = 'ncmply4-disc-pos'
+// 自动跳过的防死循环上限：一轮里最多次数取 min(队列长度, 这个值)，
+// 再大的歌单也顶多连跳这么多次，避免「全部不可播」时无休止地请求接口。
+const SKIP_MAX = 30
 
 // ---------------------------------------------------------------------------
 // 节奏检测引擎（ncm-player4 新功能 1 的核心）
@@ -319,7 +328,7 @@ const NCM_CSS = `
 
 function apply (ctx) {
   const styleEl = document.createElement('style')
-  styleEl.id = 'ncm-player4-style'
+  styleEl.id = 'ncm-player5-style'
   styleEl.textContent = NCM_CSS
   document.head.appendChild(styleEl)
 
@@ -344,7 +353,7 @@ function apply (ctx) {
   // ---- 本地持久化：登录态与播放队列保存在浏览器 localStorage（host 不再写盘）。
   // 所有读写都 try/catch 包裹：隐私模式等场景下静默降级为"不持久化"。
   // LS_KEY 沿用 ncm-player2 的 key：同为 ncm 系插件，切换 v2/v3 时保留
-  // 同一份登录态与播放队列（各插件全局状态本就互不影响，v3 由 cordis.patch.yml 保证唯一）。
+  // 同一份登录态与播放队列（各插件全局状态本就互不影响，由 cordis.patch.yml 保证唯一）。
   const LS_KEY = 'ncmply2-settings'
   const lsRead = () => {
     try {
@@ -621,6 +630,14 @@ function apply (ctx) {
     const autoPlayRef = useRef(true)
     // 当前地址是否已因「无 CORS 响应头」回退过一次（避免 onError 循环重试）。
     const corsRetryRef = useRef(false)
+    // 自动跳过的防死循环闸门：{ tries, stopped }。
+    //   tries   —— 本轮连续跳过了几首坏歌（成功播放一首就清零）；
+    //   stopped —— 本轮已经判定「队列里没有能放的歌」并停了播放，需要用户再点播放
+    //              （或换歌/换队列）才重新开闸，否则每次 update 都会被再次误判成坏歌。
+    // 用 ref 而不是 state：跳过发生在 fetch 回调 / 事件回调里，需要读到同步的最新值。
+    const skipGuardRef = useRef({ tries: 0, stopped: false })
+    // 上一首「判定为不可播」的歌曲 id + 原因：用于 toast 区分（A→B 跳过后不再重复提示 A）。
+    const skipNoticeRef = useRef({ id: null, name: '', reason: null })
     const liveRef = useRef(null)
     const throttledSaveRef = useRef(null)
     const accountRef = useRef(null)
@@ -629,6 +646,9 @@ function apply (ctx) {
     const song = index >= 0 && index < queue.length ? queue[index] : null
     // ncm-player3：无操作自动退出的开关（默认开启，持久化到 state.autoExit）。
     const [autoExit, setAutoExit] = useState(true)
+    // ncm-player5：遇到下架/无版权/放不出来的歌自动跳下一首（默认开启，
+    // 持久化到 state.autoSkip；关掉后行为与 ncm-player4 完全一致）。
+    const [autoSkip, setAutoSkip] = useState(true)
 
     // --- ncm-player4 新功能 1：随音乐节奏跳动 ---
     // rhythm：当前这拍的形参（key/scale/glow/dur）；每拍换 key 以重放 CSS 动画。
@@ -663,7 +683,7 @@ function apply (ctx) {
       const s = liveRef.current
       if (!s) return null
       const a = audioRef.current
-      return { queue: s.queue.slice(0, 300), index: s.index, mode: s.mode, vol: s.muted ? 0 : s.vol, quality: s.quality, showTrans: s.showTrans, showMiniLrc: s.showMiniLrc, miniLrcScroll: s.miniLrcScroll, miniLrcSize: s.miniLrcSize, time: a && a.currentTime ? Math.round(a.currentTime * 1000) : 0 }
+      return { queue: s.queue.slice(0, 300), index: s.index, mode: s.mode, vol: s.muted ? 0 : s.vol, quality: s.quality, showTrans: s.showTrans, showMiniLrc: s.showMiniLrc, miniLrcScroll: s.miniLrcScroll, miniLrcSize: s.miniLrcSize, autoExit: s.autoExit, autoSkip: s.autoSkip, time: a && a.currentTime ? Math.round(a.currentTime * 1000) : 0 }
     }
     const applyAccount = (acc) => { setAccount(acc); accountRef.current = acc }
     const applySavedState = (st) => {
@@ -684,6 +704,7 @@ function apply (ctx) {
       if (typeof st.showMiniLrc === 'boolean') setShowMiniLrc(st.showMiniLrc)
       if (typeof st.miniLrcScroll === 'boolean') setMiniLrcScroll(st.miniLrcScroll)
       if (st.miniLrcSize === 9 || st.miniLrcSize === 11 || st.miniLrcSize === 13) setMiniLrcSize(st.miniLrcSize)
+      if (typeof st.autoSkip === 'boolean') setAutoSkip(st.autoSkip)
     }
     // 把当前登录态与播放队列写入 localStorage（登录/登出时同步写，队列变化由 saveNow 写）。
     // 读-改-写：登录恢复是异步的，恢复完成前 accountCookieRef 为 null——
@@ -703,13 +724,14 @@ function apply (ctx) {
       api('saveState', { state: st }).catch(() => { })
       persistLocal()
     }
-    liveRef.current = { queue, index, mode, vol, muted, quality, showTrans, showMiniLrc, miniLrcScroll, miniLrcSize, autoExit }
+    liveRef.current = { queue, index, mode, vol, muted, quality, showTrans, showMiniLrc, miniLrcScroll, miniLrcSize, autoExit, autoSkip }
 
-    // 从 localStorage 恢复 autoExit 开关（默认开启）。
+    // 从 localStorage 恢复 autoExit / autoSkip 开关（默认都开启）。
     useEffect(() => {
       const saved = lsRead()
       const st = saved && saved.state
       if (st && typeof st.autoExit === 'boolean') setAutoExit(st.autoExit)
+      if (st && typeof st.autoSkip === 'boolean') setAutoSkip(st.autoSkip)
     }, [])
 
     useEffect(() => {
@@ -756,7 +778,7 @@ function apply (ctx) {
       if (!throttledSaveRef.current) throttledSaveRef.current = timer.throttle(() => saveNow(), 1500)
       throttledSaveRef.current()
       return () => { if (throttledSaveRef.current) { try { throttledSaveRef.current.dispose() } catch (e) { } throttledSaveRef.current = null } }
-    }, [queue, index, mode, vol, quality, showTrans, showMiniLrc, miniLrcScroll, miniLrcSize])
+    }, [queue, index, mode, vol, quality, showTrans, showMiniLrc, miniLrcScroll, miniLrcSize, autoSkip])
 
     useEffect(() => {
       if (!playing) return undefined
@@ -771,12 +793,106 @@ function apply (ctx) {
       api('myAlbums').then((r) => setMyAlbums(r.items || [])).catch(() => { })
     }, [account && account.uid])
 
+    // --- ncm-player5 新功能：不可播放歌曲自动跳过 ---
+    // 判定来源有两个：
+    //   ① 地址阶段：host 的 songUrl 返回 playable===false（下架/无版权/无音源）；
+    //   ② 元素阶段：<audio> 报错且「换元素」「去 CORS」两条自救分支都不适用（见 onAudioError）。
+    // 老 host 的 songUrl 只有 { url }，没有 playable 字段 → 视为「未知」，一律不跳。
+    const skipReasonText = (reason) => (reason === 'copyright' ? '无版权/已下架' : '暂时无法播放')
+    // 记下「刚刚跳过了哪首、为什么」，供下一首解析地址时补一条汇总提示。
+    // 不在跳过的瞬间弹 toast：那样快速连跳时会刷屏，用户只看到最后一首的名字。
+    const noteSkipped = (s, reason) => { skipNoticeRef.current = { id: s ? s.id : null, name: s ? s.name : '', reason: reason || 'unavailable' } }
+    // 用户主动点播 / 上一首 / 手动下一首：那是明确的新一次播放意图，防死循环的计数重新开闸。
+    const resetSkipGuard = () => { skipGuardRef.current = { tries: 0, stopped: false } }
+    // 按当前播放模式算出「被跳过时该跳到哪首」：
+    //   顺序 —— index+1，到末尾回到第 0 首（可播的歌曲循环播放）；
+    //   随机 —— 随机取一首并避开当前这首（队列只剩 1 首时只能原地不动）；
+    //   单曲 —— 也跳到下一首：单曲循环重播这首坏歌毫无意义，会一直卡死。
+    const skipTargetIndex = () => {
+      const n = queue.length
+      if (n <= 1) return -1
+      let base = index
+      if (base < 0 || base >= n) base = n - 1
+      if (mode === 'shuffle') {
+        let i = Math.floor(Math.random() * n)
+        if (i === base) i = (base + 1) % n
+        return i
+      }
+      return (base + 1) % n
+    }
+    // 播放中遇到不可播放的歌 → 跳到下一首并继续播放。
+    // 返回 true 表示已经接管（跳走或停下），调用方不必再弹常规的「播放失败」提示。
+    //
+    // 防死循环（这是整个功能最关键的部分）：
+    //   · 每跳一次 tries+1；成功播放一首（onPlay）就把 tries 清零；
+    //   · tries 达到本轮上限（min(队列长度, SKIP_MAX)）时说明整轮都放不出来 →
+    //     setPlaying(false) 停在当前这首，并弹一次「队列中没有可播放的歌曲」；
+    //   · 停下后 stopped=true 且 tries>=上限，此后任何新的「不可播」报告都只提示不跳，
+    //     必须由用户点播放/上一首/下一首（resetSkipGuard）才重新开闸——否则用户手动
+    //     点回一首坏歌会触发无限「跳→点回→跳」的拉锯；
+    //   · 队列只有 1 首时直接停（跳过目标为 -1），不会反复解析同一个地址。
+    const skipUnplayable = (s, reason, from) => {
+      if (!s) return false
+      // 关掉开关时完全退回 ncm-player4：只保留原来的 toast，不跳歌。
+      if (!autoSkip) {
+        if (from === 'url') showToast('无法播放: 可能无版权或已下架')
+        return false
+      }
+      const g = skipGuardRef.current
+      // 已经停过一轮了：不再自动继续，交给用户决定。
+      if (g.stopped) {
+        if (from === 'url') showToast('《' + s.name + '》无法播放: ' + skipReasonText(reason))
+        return true
+      }
+      const cap = Math.min(queue.length, SKIP_MAX)
+      const tgt = skipTargetIndex()
+      if (tgt < 0 || g.tries >= cap) {
+        g.stopped = true
+        setPlaying(false)
+        noteSkipped(s, reason)
+        showToast(queue.length <= 1 ? '《' + s.name + '》无法播放: ' + skipReasonText(reason) : '队列中没有可播放的歌曲')
+        return true
+      }
+      g.tries += 1
+      noteSkipped(s, reason)
+      autoPlayRef.current = true
+      setIndex(tgt)
+      return true
+    }
+    // 地址解析失败（网络/接口异常）时：原来只弹 toast 留在原地；开了自动跳过就顺手跳下一首，
+    // 否则一首返回异常的坏数据会把整轮播放卡死在这里。
+    const skipOnUrlError = (s, err) => {
+      const msg = String((err && err.message) || err || '')
+      if (autoSkip && s) {
+        if (skipUnplayable(s, 'error', 'err')) return
+      }
+      showToast('获取播放地址失败: ' + msg)
+    }
+
     useEffect(() => {
       if (!song) { setSongUrl(null); setLyrics([]); setDur(0); setTime(0); return }
+      // 换歌就得重新走 CORS 兜底：上一首可能在元素层把 corsRetryRef 置成了 true，
+      // 不清掉的话下一首会直接用「不走 CORS」的普通加载。
+      corsRetryRef.current = false
       setLoading(true)
-      api('songUrl', { id: song.id, br: quality }).then((r) => setSongUrl(r.url)).catch((e) => { setSongUrl(null); showToast('获取播放地址失败: ' + e.message) }).finally(() => setLoading(false))
+      api('songUrl', { id: song.id, br: quality }).then((r) => {
+        // ① host 明确告知不可播（playable===false）：不再加载音频，直接按模式跳过。
+        //    老格式 { url } 没有 playable 字段 → undefined，视为未知，照旧播放（不跳）。
+        if (r && r.playable === false) {
+          setSongUrl(null)
+          skipUnplayable(song, r.reason || 'unavailable', 'url')
+          return
+        }
+        // 上一首被跳过时留下了一条提示，这里补在「成功」的那首上，避免连续跳歌时刷屏。
+        const note = skipNoticeRef.current
+        if (note && note.id) {
+          skipNoticeRef.current = { id: null, name: '', reason: null }
+          showToast('已跳过《' + (note.name || '未知歌曲') + '》: ' + skipReasonText(note.reason))
+        }
+        setSongUrl(r.url)
+      }).catch((e) => { setSongUrl(null); skipOnUrlError(song, e) }).finally(() => setLoading(false))
       api('lyric', { id: song.id }).then((r) => setLyrics(parseLrc(r.lrc, r.tlyric, r.romalrc))).catch(() => setLyrics([]))
-    }, [index])
+    }, [index, quality, autoSkip])
 
     useEffect(() => {
       if (song) setLiked(!!(likedIds && likedIds.has(song.id)))
@@ -825,9 +941,12 @@ function apply (ctx) {
     const onAudioError = () => {
       const a = audioRef.current
       const eng = rhythmEngineRef.current
+      // 已被 Web Audio 接管的元素再报错，要先换新元素重来一次，不能直接判定不可播：
+      // 「接管后才失败」也可能只是 AudioContext 被挂起 / 图断了（见下方说明）。
+      const wasAttached = !!(a && eng && eng.attached === a)
       // 已经被 Web Audio 接管过的元素：它现在只能靠 AudioContext 发声，
       // 而这条链路一旦因跨域/失效而失败就再也救不回来，只能换新元素重开。
-      if (a && eng && eng.attached === a) {
+      if (wasAttached) {
         if (!corsRetryRef.current) corsRetryRef.current = true
         setAudioGen((g) => g + 1)
         return
@@ -844,12 +963,26 @@ function apply (ctx) {
         } catch (e) { }
         return
       }
+      // 与上面两次自救都不相关，才轮到「这首歌是不是根本放不出来」：
+      //   · code 4 = SRC_NOT_SUPPORTED（服务端给的其实是 404 页/空文件/下架占位），
+      //   · code 3 = DECODE（文件损坏）——这两种基本不可能靠重试恢复，可以直接判定不可播；
+      //   · CORS 兜底已经用尽（corsRetryRef=true）说明这个地址连「不走 CORS」都放不出来，
+      //     同样是稳定失败，算作不可播。
+      //   其余情况（code 2 网络中断等）往往是暂时性的，维持原来的 toast 行为，绝不跳歌。
+      // 「换元素重播」出现在这条分支之前，所以那次重试不会被误判成不可播。
+      const code = a && a.error ? a.error.code : 0
+      const fatal = code === 4 || code === 3
+      if (songUrl && (fatal || corsRetryRef.current)) {
+        const handled = skipUnplayable(song, 'unavailable', 'audio')
+        if (handled) return
+      }
       if (songUrl) showToast('播放出错(可能无版权或需会员)')
     }
 
-    const playAt = (i) => { if (i >= 0 && i < queue.length) { autoPlayRef.current = true; setIndex(i); setTab('play') } }
+    const playAt = (i) => { if (i >= 0 && i < queue.length) { resetSkipGuard(); autoPlayRef.current = true; setIndex(i); setTab('play') } }
     const playFrom = (tracks, i) => {
       if (!tracks || !tracks.length) return
+      resetSkipGuard()
       autoPlayRef.current = true
       setQueue(tracks.map((s) => ({ id: s.id, name: s.name, artists: s.artists, album: s.album, cover: s.cover, duration: s.duration })))
       setIndex(Math.max(0, i))
@@ -863,11 +996,13 @@ function apply (ctx) {
     const toggle = () => {
       const a = audioRef.current
       if (!a || !song) return
+      resetSkipGuard()
       autoPlayRef.current = true
       if (a.paused) a.play().catch(() => { }); else a.pause()
     }
     const next = () => {
       if (!queue.length) return
+      resetSkipGuard()
       autoPlayRef.current = true
       if (mode === 'shuffle') { let i = Math.floor(Math.random() * queue.length); if (i === index) i = (i + 1) % queue.length; setIndex(i); return }
       setIndex((index + 1) % queue.length)
@@ -876,6 +1011,7 @@ function apply (ctx) {
       const a = audioRef.current
       if (a && a.currentTime > 3) { a.currentTime = 0; return }
       if (!queue.length) return
+      resetSkipGuard()
       autoPlayRef.current = true
       setIndex((index - 1 + queue.length) % queue.length)
     }
@@ -892,6 +1028,7 @@ function apply (ctx) {
       }
     }
     const clearQueue = () => {
+      resetSkipGuard()
       setQueue([]); setIndex(-1); setSongUrl(null)
       const a = audioRef.current
       if (a) { a.pause(); a.removeAttribute('src') }
@@ -1521,6 +1658,10 @@ function apply (ctx) {
             h('input', { type: 'checkbox', checked: autoExit, onChange: (e) => setAutoExit(e.target.checked) }),
           ]),
           h('div', { className: 'ncm-toggle' }, [
+            h('label', null, '自动跳过不可播放的歌曲'),
+            h('input', { type: 'checkbox', checked: autoSkip, onChange: (e) => setAutoSkip(e.target.checked) }),
+          ]),
+          h('div', { className: 'ncm-toggle' }, [
             h('label', null, '迷你歌词字号'),
             h('select', { className: 'ncm-select', value: miniLrcSize, onChange: (e) => setMiniLrcSize(Number(e.target.value)) }, [
               h('option', { value: 9 }, '小 9'),
@@ -1531,7 +1672,7 @@ function apply (ctx) {
         ]),
         h('div', { className: 'ncm-set-sec' }, [
           h('div', { className: 'ncm-set-title' }, [h(Ico, { d: ICONS.lrc, size: 14 }), h('span', null, '说明')]),
-          h('div', { className: 'ncm-hint' }, '· 播放/搜索/歌词无需登录; "我的音乐"与收藏需要登录。\n· Cookie 仅用于请求 music.163.com, 不发送给任何第三方。\n· 登录态与播放队列保存在本机浏览器(localStorage), 不再写入 ~/.dsh 文件。\n· 界面颜色跟随当前皮肤主题。\n· 播放界面无操作 3 秒会自动隐藏为右下角按钮(播放不中断), 可在上面关闭。\n· 退出后若仍在播放, 右下角按钮会跟着音乐节奏跳动(检测到鼓点就跳, 强弱随音乐)。\n· 右下角按钮支持左键长按拖动, 位置会自动记住。\n· 受版权或会员限制的歌曲可能无法播放。'),
+          h('div', { className: 'ncm-hint' }, '· 播放/搜索/歌词无需登录; "我的音乐"与收藏需要登录。\n· Cookie 仅用于请求 music.163.com, 不发送给任何第三方。\n· 登录态与播放队列保存在本机浏览器(localStorage), 不再写入 ~/.dsh 文件。\n· 界面颜色跟随当前皮肤主题。\n· 播放界面无操作 3 秒会自动隐藏为右下角按钮(播放不中断), 可在上面关闭。\n· 退出后若仍在播放, 右下角按钮会跟着音乐节奏跳动(检测到鼓点就跳, 强弱随音乐)。\n· 右下角按钮支持左键长按拖动, 位置会自动记住。\n· 遇到因下架/无版权而无法播放的歌曲会自动跳过, 播放下一首(可在上面关闭)。'),
         ]),
       ]),
     ])
@@ -1551,7 +1692,7 @@ function apply (ctx) {
       ? Object.assign({}, ringStyle, { '--ncm-glow': rhythm.glow, '--ncm-splash-dur': Math.round(rhythm.dur * 1.7) + 'ms' })
       : ringStyle
     return h('div', { className: 'ncm-wrap' }, [
-      h('audio', { key: 'au-' + audioGen, ref: audioRef, preload: 'auto', onTimeUpdate: onTimeUpdate, onLoadedMetadata: onLoadedMetadata, onEnded: onEnded, onError: onAudioError, onPlay: () => setPlaying(true), onPause: () => { setPlaying(false); saveNow() } }),
+      h('audio', { key: 'au-' + audioGen, ref: audioRef, preload: 'auto', onTimeUpdate: onTimeUpdate, onLoadedMetadata: onLoadedMetadata, onEnded: onEnded, onError: onAudioError, onPlay: () => { resetSkipGuard(); setPlaying(true) }, onPause: () => { setPlaying(false); saveNow() } }),
       toast ? h('div', { key: 'toast', className: 'ncm-toast' }, toast.msg) : null,
       // --- ncm-player4 新功能 1：右下角音符按钮随音乐节奏跳动 ---
       // 界面已退出(visible=false)且音频仍在播放时：每检测到一个低频鼓点就扩散一圈光环
@@ -1607,7 +1748,7 @@ function apply (ctx) {
   }
 
   slots.inject('shell.overlay', () => slots.register(
-    { name: 'shell.overlay', id: 'ncm-player4-window', order: 100, label: '网易云音乐浮窗' },
+    { name: 'shell.overlay', id: 'ncm-player5-window', order: 100, label: '网易云音乐浮窗' },
     () => h(NcmPlayer)
   ))
 
